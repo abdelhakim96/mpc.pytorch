@@ -26,4 +26,3 @@ and
 
   Comments:
   pip3 install "gym==0.17.2"
-
