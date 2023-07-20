@@ -1,14 +1,12 @@
 import logging
 import math
 import time
-
 import gym
 import numpy as np
 import torch
 import torch.autograd
-from gym import wrappers, logger as gym_log
+from gym import wrappers, wrappers, logger as gym_log
 from mpc import mpc
-
 gym_log.set_level(gym_log.INFO)
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG,
