@@ -22,3 +22,7 @@ and
 + [More details are available on our project website here](http://locuslab.github.io/mpc.pytorch)
 + This is still an early alpha release, be prepared for some rough
   spots and get in touch if you have any questions!
+
+
+  Comments:
+  pip3 install "gym==0.17.2"
