@@ -15,31 +15,25 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 plt.style.use('bmh')
 
-class PendulumDx(nn.Module):
+class CarDx(nn.Module): #change
     def __init__(self, params=None, simple=True):
         super().__init__()
-        self.simple = simple
-
-        self.max_torque = 2.0
+        #self.simple = simple
+        self.max_u1 = 1.0
+        self.max_u2 = 1.0
         self.dt = 0.05
-        self.n_state = 3
-        self.n_ctrl = 1
+        self.n_state = 5
+        self.n_ctrl = 2
 
-        if params is None:
-            if simple:
-                # gravity (g), mass (m), length (l)
-                self.params = Variable(torch.Tensor((10., 1., 1.)))
-            else:
-                # gravity (g), mass (m), length (l), damping (d), gravity bias (b)
-                self.params = Variable(torch.Tensor((10., 1., 1., 0., 0.)))
-        else:
-            self.params = params
+        # Linear Inertia (M), Angular Inertia (J), friction (D)
+        self.params = Variable(torch.Tensor((1., 1., 0.)))
 
-        assert len(self.params) == 3 if simple else 5
+        #assert len(self.params) == 3 if simple else 5
 
-        self.goal_state = torch.Tensor([1., 0., 0.])
-        self.goal_weights = torch.Tensor([1., 1., 0.1])
-        self.ctrl_penalty = 0.001
+        self.goal_state = torch.Tensor([1., 1., 0., 0., 0.])
+        self.goal_weights = torch.Tensor([1., 1., 0.1, 0., 0.])
+        self.ctrl_penalty = torch.Tensor([0.001, 0.001])
+        #self.ctrl_penalty = 0.001
         self.lower, self.upper = -2., 2.
 
         self.mpc_eps = 1e-3
@@ -55,29 +49,25 @@ class PendulumDx(nn.Module):
 
         assert x.ndimension() == 2
         assert x.shape[0] == u.shape[0]
-        assert x.shape[1] == 3
-        assert u.shape[1] == 1
+        assert x.shape[1] == 5
+        assert u.shape[1] == 2
         assert u.ndimension() == 2
 
         if x.is_cuda and not self.params.is_cuda:
             self.params = self.params.cuda()
 
-        if not hasattr(self, 'simple') or self.simple:
-            g, m, l = torch.unbind(self.params)
-        else:
-            g, m, l, d, b = torch.unbind(self.params)
+        pos_x, pos_y, v, th, dth = torch.unbind(x, dim=1)
 
-        u = torch.clamp(u, -self.max_torque, self.max_torque)[:,0]
-        cos_th, sin_th, dth = torch.unbind(x, dim=1)
-        th = torch.atan2(sin_th, cos_th)
-        if not hasattr(self, 'simple') or self.simple:
-            newdth = dth + self.dt*(-3.*g/(2.*l) * (-sin_th) + 3. * u / (m*l**2))
-        else:
-            sin_th_bias = torch.sin(th + b)
-            newdth = dth + self.dt*(
-                -3.*g/(2.*l) * (-sin_th_bias) + 3. * u / (m*l**2) - d*th)
-        newth = th + newdth*self.dt
-        state = torch.stack((torch.cos(newth), torch.sin(newth), newdth), dim=1)
+
+
+
+        pos_x = pos_x + v * torch.cos(th) * self.dt
+        pos_y = pos_y + v * torch.sin(th) * self.dt
+        v = v + u[0,0] * self.dt
+        th = th + dth * self.dt
+        dth = dth + u[0,1] * self.dt
+        state = torch.stack(( pos_x, pos_y, v ,th, dth ), 1)
+
 
         if squeeze:
             state = state.squeeze(0)
@@ -85,22 +75,19 @@ class PendulumDx(nn.Module):
 
     def get_frame(self, x, ax=None):
         x = util.get_data_maybe(x.view(-1))
-        assert len(x) == 3
-        l = self.params[2].item()
+        assert len(x) == 5
 
-        cos_th, sin_th, dth = torch.unbind(x)
-        th = np.arctan2(sin_th, cos_th)
-        x = sin_th*l
-        y = cos_th*l
+
+        pos_x, pos_y, v, th, dth = torch.unbind(x)
+
 
         if ax is None:
             fig, ax = plt.subplots(figsize=(6,6))
         else:
             fig = ax.get_figure()
 
-        ax.plot((0,x), (0, y), color='k')
-        ax.set_xlim((-l*1.2, l*1.2))
-        ax.set_ylim((-l*1.2, l*1.2))
+        ax.plot((pos_x,pos_y), color='k')
+
         return fig, ax
 
     def get_true_obj(self):
@@ -115,12 +102,11 @@ class PendulumDx(nn.Module):
 
 
 if __name__ == '__main__':
-    dx = PendulumDx()
-    n_batch, T = 8, 50
+    dx = CarDx()
+    n_batch, T = 1, 10
     u = torch.zeros(T, n_batch, dx.n_ctrl)
     xinit = torch.zeros(n_batch, dx.n_state)
-    xinit[:,0] = np.cos(0)
-    xinit[:,1] = np.sin(0)
+    xinit[:,:] = 0.
     x = xinit
     for t in range(T):
         x = dx(x, u[t])
@@ -128,7 +114,7 @@ if __name__ == '__main__':
         fig.savefig('{:03d}.png'.format(t))
         plt.close(fig)
 
-    vid_file = 'pendulum_vid.mp4'
+    vid_file = 'car_vid.mp4'
     if os.path.exists(vid_file):
         os.remove(vid_file)
     cmd = ('(/usr/bin/ffmpeg -loglevel quiet '

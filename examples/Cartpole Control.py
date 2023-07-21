@@ -23,7 +23,7 @@ from IPython.display import HTML
 
 from tqdm import tqdm
 
-get_ipython().run_line_magic('matplotlib', 'inline')
+#get_ipython().run_line_magic('matplotlib', 'inline')
 
 
 # In[2]:
