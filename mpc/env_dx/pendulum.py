@@ -124,18 +124,18 @@ if __name__ == '__main__':
     x = xinit
     for t in range(T):
         x = dx(x, u[t])
-        fig, ax = dx.get_frame(x[0])
-        fig.savefig('{:03d}.png'.format(t))
-        plt.close(fig)
+        #fig, ax = dx.get_frame(x[0])
+        #fig.savefig('{:03d}.png'.format(t))
+        #plt.close(fig)
 
-    vid_file = 'pendulum_vid.mp4'
-    if os.path.exists(vid_file):
-        os.remove(vid_file)
-    cmd = ('(/usr/bin/ffmpeg -loglevel quiet '
-            '-r 32 -f image2 -i %03d.png -vcodec '
-            'libx264 -crf 25 -pix_fmt yuv420p {}/) &').format(
-        vid_file
-    )
-    os.system(cmd)
-    for t in range(T):
-        os.remove('{:03d}.png'.format(t))
+    #vid_file = 'pendulum_vid.mp4'
+    #if os.path.exists(vid_file):
+    #    os.remove(vid_file)
+    #cmd = ('(/usr/bin/ffmpeg -loglevel quiet '
+    #        '-r 32 -f image2 -i %03d.png -vcodec '
+    #        'libx264 -crf 25 -pix_fmt yuv420p {}/) &').format(
+    #    vid_file
+    #)
+    #os.system(cmd)
+    #for t in range(T):
+    #    os.remove('{:03d}.png'.format(t))

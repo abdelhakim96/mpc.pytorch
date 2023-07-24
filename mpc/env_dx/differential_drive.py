@@ -1,3 +1,7 @@
+# differential drive robot model
+# by Hakim Amer 24/7/2023
+
+
 import torch
 from torch.autograd import Function, Variable
 import torch.nn.functional as F
@@ -15,28 +19,29 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 plt.style.use('bmh')
 
-class CarDx(nn.Module): #change
+class DiffDriveDx(nn.Module): #change
     def __init__(self, params=None, simple=True):
         super().__init__()
         #self.simple = simple
-        self.max_u1 = 10.0
-        self.max_u2 = 10.0
-        self.dt = 0.05
-        self.n_state = 5
-        self.n_ctrl = 2
+        self.max_ur = 10.0  # max right wheel speed
+        self.max_ul = 10.0  # max left wheel speed
+        self.dt = 0.05      # MPC sampling time
+        self.n_state = 5    # number of states
+        self.n_ctrl = 2     # number of control inputs
 
-        # Linear Inertia (M), Angular Inertia (J), friction (D)
-        self.params = Variable(torch.Tensor((1., 1., 0.)))
+        # robot params, Linear Inertia (M), Angular Inertia (J), friction (D), Length(L)
+        self.params = Variable(torch.Tensor((1., 1., 0., 1.0)))
 
-        #assert len(self.params) == 3 if simple else 5
-
+        #States: [px, py, v, th, dth]
         self.goal_state = torch.Tensor([1., 1., 0., 0., 0.])
+
         self.goal_weights = torch.Tensor([50., 50., 0.1, 3., 3.])
+
+        #Control: [u_r, u_l]
         self.ctrl_penalty = torch.Tensor([0.001, 0.001])
-        #self.ctrl_penalty = 0.001
         self.lower, self.upper = -10., 10.
 
-        self.mpc_eps = 1e-3
+        self.mpc_eps = 1e-3  #
         self.linesearch_decay = 0.2
         self.max_linesearch_iter = 5
 
@@ -63,9 +68,10 @@ class CarDx(nn.Module): #change
 
         pos_x = pos_x + v * torch.cos(th) * self.dt
         pos_y = pos_y + v * torch.sin(th) * self.dt
-        v = v + u[0,0] * self.dt
+        v = v + (u[0,0] + u[0,1]) * self.dt
         th = th + dth * self.dt
-        dth = dth + u[0, 1] * self.dt
+
+        dth = dth + ((u[0, 0] -u[0, 1])* self.params[3] ) * self.dt
         state = torch.stack(( pos_x, pos_y, v ,th, dth ), 1)
 
 
@@ -110,7 +116,7 @@ class CarDx(nn.Module): #change
 
 
 if __name__ == '__main__':
-    dx = CarDx()
+    dx = DiffDriveDx()
     n_batch, T = 1, 100
     u = torch.zeros(T, n_batch, dx.n_ctrl)
     xinit = torch.zeros(n_batch, dx.n_state)
@@ -122,7 +128,7 @@ if __name__ == '__main__':
         fig.savefig('{:03d}.png'.format(t))
         plt.close(fig)
 
-    vid_file = 'car_vid.mp4'
+    vid_file = 'diff_drive_vid.mp4'
     if os.path.exists(vid_file):
         os.remove(vid_file)
     cmd = ('(/usr/bin/ffmpeg -loglevel quiet '

@@ -8,7 +8,7 @@ import torch
 #from IPython import get_ipython
 from mpc import mpc
 from mpc.mpc import QuadCost, LinDx, GradMethods
-from mpc.env_dx import car
+from mpc.env_dx import differential_drive
 
 import numpy as np
 import numpy.random as npr
@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 params = torch.tensor((10., 1., 1.))
 
-dx = car.CarDx(params, simple=True)
+dx = differential_drive.DiffDriveDx(params, simple=True)
 
 n_batch, T, mpc_T = 1, 100, 40
 
@@ -104,7 +104,7 @@ for t in tqdm(range(T)):
 # In[3]:
 
 
-vid_fname = 'car-{}.mp4'.format(mode)
+vid_fname = 'diff_drive-{}.mp4'.format(mode)
 
 if os.path.exists(vid_fname):
     os.remove(vid_fname)

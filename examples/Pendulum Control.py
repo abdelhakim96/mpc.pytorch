@@ -32,7 +32,7 @@ from tqdm import tqdm
 params = torch.tensor((10., 1., 1.))
 dx = pendulum.PendulumDx(params, simple=True)
 
-n_batch, T, mpc_T = 16, 100, 20
+n_batch, T, mpc_T = 1000, 100, 20
 
 def uniform(shape, low, high):
     r = high-low
@@ -97,21 +97,21 @@ for t in tqdm(range(T)):
     u_init[-2] = u_init[-3]
     x = dx(x, next_action)
 
-    n_row, n_col = 4, 4
-    fig, axs = plt.subplots(n_row, n_col, figsize=(3*n_col,3*n_row))
-    axs = axs.reshape(-1)
-    for i in range(n_batch):
-        dx.get_frame(x[i], ax=axs[i])
-        axs[i].get_xaxis().set_visible(False)
-        axs[i].get_yaxis().set_visible(False)
-    fig.tight_layout()
-    fig.savefig(os.path.join(t_dir, '{:03d}.png'.format(t)))
-    plt.close(fig)
+    # n_row, n_col = 4, 4
+    # fig, axs = plt.subplots(n_row, n_col, figsize=(3*n_col,3*n_row))
+    # axs = axs.reshape(-1)
+    # for i in range(n_batch):
+    #     dx.get_frame(x[i], ax=axs[i])
+    #     axs[i].get_xaxis().set_visible(False)
+    #     axs[i].get_yaxis().set_visible(False)
+    # fig.tight_layout()
+    # fig.savefig(os.path.join(t_dir, '{:03d}.png'.format(t)))
+    # plt.close(fig)
 
 
 # In[3]:
 
-
+''''''
 vid_fname = 'pendulum-{}.mp4'.format(mode)
 
 if os.path.exists(vid_fname):
