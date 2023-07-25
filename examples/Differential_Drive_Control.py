@@ -32,7 +32,7 @@ params = torch.tensor((10., 1., 1.))
 
 dx = differential_drive.DiffDriveDx(params, simple=True)
 
-n_batch, T, mpc_T = 1, 100, 40
+n_batch, T, mpc_T = 1, 100, 60
 
 
 
@@ -47,7 +47,7 @@ mode = 'reference-following'
 # mode = 'spin'
 
 if mode == 'reference-following':
-    goal_weights = torch.Tensor((5.0, 5.0, 0.5, 0.1,0.1))
+    goal_weights = torch.Tensor((30.0, 30.0, 3.0, 0.1,0.01))
     goal_state = torch.Tensor((1., 1., 0. , 0. , 0.))
     ctrl_penalty = torch.Tensor((0.0001, 0.0001))
     #ctrl_penalty = 0.00001

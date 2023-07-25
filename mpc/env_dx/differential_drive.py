@@ -96,11 +96,24 @@ class DiffDriveDx(nn.Module): #change
             fig = ax.get_figure()
 
         ax.scatter(pos_x,pos_y, color='blue')
-        ax.quiver(pos_x, pos_y, torch.cos(th), torch.sin(th))
-        #print('x',pos_x)
+       # ax.scatter(pos_x+torch.sin(th)*self.params[3]/10, pos_y-torch.cos(th)*self.params[3]/10, color='black')
+       # ax.scatter(pos_x - torch.sin(th) * self.params[3] /10, pos_y + torch.cos(th) * self.params[3] / 10,
+       #    color='black')
 
 
-        #ax.plot((u1,u2), color='red')
+        x_robot = [pos_x+torch.sin(th)*self.params[3]/50,pos_x - torch.sin(th) * self.params[3] /50]
+        y_robot = [pos_y-torch.cos(th)*self.params[3]/50, pos_y + torch.cos(th) * self.params[3] / 50]
+        ax.plot(x_robot, y_robot,color='black')
+        ax.quiver(pos_x, pos_y, torch.cos(th), torch.sin(th),label='Robot Direction')
+        ax.quiver(x_robot[0], y_robot[0], -u[0,0]*torch.cos(th), -u[0,0]*torch.sin(th),
+                  color='#8B0000',linewidths=np.abs(u[0,0]), scale=1,label='Wheel Velocity Right')
+        ax.quiver(x_robot[1], y_robot[1], -u[0,1]*torch.cos(th), -u[0,1]*torch.sin(th),
+                  color='red',linewidths=np.abs(u[0,1]), scale=1,label='Wheel Velocity Left')
+
+        #ax.legend(loc='upper right', bbox_to_anchor=(2.5, 1), borderaxespad=0.)
+
+        #plt.tight_layout(rect=[0, 0, 1.15, 1])
+
 
         return fig, ax
 
