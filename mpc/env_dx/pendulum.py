@@ -3,6 +3,7 @@ from torch.autograd import Function, Variable
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.parameter import Parameter
+from line_profiler_pycharm import profile
 
 import numpy as np
 
@@ -11,12 +12,15 @@ from mpc import util
 import os
 
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
 plt.style.use('bmh')
 
+
 class PendulumDx(nn.Module):
-    def __init__(self, params=None, simple=True):
+    def __init__(self, params=None, simple=True, debug_memory_mode=False):
         super().__init__()
         self.simple = simple
 
@@ -45,8 +49,15 @@ class PendulumDx(nn.Module):
         self.mpc_eps = 1e-3
         self.linesearch_decay = 0.2
         self.max_linesearch_iter = 5
+        self.debug_memory_mode = debug_memory_mode
+        if self.debug_memory_mode:
+            self.params.debug_name = f"(PDx) params"
+            self.goal_state.debug_name = f"(PDx) goal_state"
+            self.goal_weights.debug_name = f"(PDx) goal_weights"
 
+    @profile
     def forward(self, x, u):
+
         squeeze = x.ndimension() == 1
 
         if squeeze:
@@ -66,50 +77,76 @@ class PendulumDx(nn.Module):
             g, m, l = torch.unbind(self.params)
         else:
             g, m, l, d, b = torch.unbind(self.params)
+            if self.debug_memory_mode:
+                d.debug_name = f"(PDx) d"
+                b.debug_name = f"(PDx) b"
+        if self.debug_memory_mode:
+            g.debug_name = f"(PDx) g"
+            m.debug_name = f"(PDx) m"
+            l.debug_name = f"(PDx) l"
 
-        u = torch.clamp(u, -self.max_torque, self.max_torque)[:,0]
+        u = torch.clamp(u[:, 0], -self.max_torque, self.max_torque)
+
         cos_th, sin_th, dth = torch.unbind(x, dim=1)
         th = torch.atan2(sin_th, cos_th)
         if not hasattr(self, 'simple') or self.simple:
-            newdth = dth + self.dt*(-3.*g/(2.*l) * (-sin_th) + 3. * u / (m*l**2))
+            constant1 = -3. * g / (2. * l)
+            constant2 = 3. / (m * l ** 2)
+            newdth = dth + self.dt * (constant1 * (-sin_th) + u * constant2)
         else:
             sin_th_bias = torch.sin(th + b)
-            newdth = dth + self.dt*(
-                -3.*g/(2.*l) * (-sin_th_bias) + 3. * u / (m*l**2) - d*th)
-        newth = th + newdth*self.dt
+            newdth = dth + self.dt * (
+                    -3. * g / (2. * l) * (-sin_th_bias) + 3. * u / (m * l ** 2) - d * th)
+            if self.debug_memory_mode:
+                sin_th_bias.debug_name = f"(PDx) sin_th_bias"
+            del d, b
+        newth = th + newdth * self.dt
         state = torch.stack((torch.cos(newth), torch.sin(newth), newdth), dim=1)
 
         if squeeze:
             state = state.squeeze(0)
+        if self.debug_memory_mode:
+            u.debug_name = f"(PDx) u"
+            cos_th.debug_name = f"(PDx) cos_th"
+            sin_th.debug_name = f"(PDx) sin_th"
+            dth.debug_name = f"(PDx) dth"
+            th.debug_name = f"(PDx) th"
+            newdth.debug_name = f"(PDx) newdth"
+            state.debug_name = f"(PDx) state"
+
+        # del cos_th, sin_th, dth, th, newdth, newth, g, m, l, u
         return state
 
     def get_frame(self, x, ax=None):
+        if x.device.type == 'cuda':
+            x = x.cpu()
+        x = x.detach()
         x = util.get_data_maybe(x.view(-1))
         assert len(x) == 3
         l = self.params[2].item()
 
         cos_th, sin_th, dth = torch.unbind(x)
-        th = np.arctan2(sin_th, cos_th)
-        x = sin_th*l
-        y = cos_th*l
+        th = torch.arctan2(sin_th, cos_th)
+        x = sin_th * l
+        y = cos_th * l
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=(6,6))
+            fig, ax = plt.subplots(figsize=(6, 6))
         else:
             fig = ax.get_figure()
 
-        ax.plot((0,x), (0, y), color='k')
-        ax.set_xlim((-l*1.2, l*1.2))
-        ax.set_ylim((-l*1.2, l*1.2))
+        ax.plot((0, x), (0, y), color='k')
+        ax.set_xlim((-l * 1.2, l * 1.2))
+        ax.set_ylim((-l * 1.2, l * 1.2))
         return fig, ax
 
     def get_true_obj(self):
         q = torch.cat((
             self.goal_weights,
-            self.ctrl_penalty*torch.ones(self.n_ctrl)
+            self.ctrl_penalty * torch.ones(self.n_ctrl)
         ))
         assert not hasattr(self, 'mpc_lin')
-        px = -torch.sqrt(self.goal_weights)*self.goal_state #+ self.mpc_lin
+        px = -torch.sqrt(self.goal_weights) * self.goal_state  # + self.mpc_lin
         p = torch.cat((px, torch.zeros(self.n_ctrl)))
         return Variable(q), Variable(p)
 
@@ -119,8 +156,8 @@ if __name__ == '__main__':
     n_batch, T = 8, 50
     u = torch.zeros(T, n_batch, dx.n_ctrl)
     xinit = torch.zeros(n_batch, dx.n_state)
-    xinit[:,0] = np.cos(0)
-    xinit[:,1] = np.sin(0)
+    xinit[:, 0] = np.cos(0)
+    xinit[:, 1] = np.sin(0)
     x = xinit
     for t in range(T):
         x = dx(x, u[t])
@@ -132,8 +169,8 @@ if __name__ == '__main__':
     if os.path.exists(vid_file):
         os.remove(vid_file)
     cmd = ('(/usr/bin/ffmpeg -loglevel quiet '
-            '-r 32 -f image2 -i %03d.png -vcodec '
-            'libx264 -crf 25 -pix_fmt yuv420p {}/) &').format(
+           '-r 32 -f image2 -i %03d.png -vcodec '
+           'libx264 -crf 25 -pix_fmt yuv420p {}/) &').format(
         vid_file
     )
     os.system(cmd)

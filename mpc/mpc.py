@@ -1,3 +1,6 @@
+import gc
+import time
+
 import torch
 from torch.autograd import Function, Variable
 from torch.nn import Module
@@ -16,7 +19,9 @@ from . import util
 from .pnqp import pnqp
 from .lqr_step import LQRStep
 from .dynamics import CtrlPassthroughDynamics
+from line_profiler_pycharm import profile
 
+from .util import print_torch_memory_allocated
 
 QuadCost = namedtuple('QuadCost', 'C c')
 LinDx = namedtuple('LinDx', 'F f')
@@ -24,6 +29,16 @@ LinDx = namedtuple('LinDx', 'F f')
 # https://stackoverflow.com/questions/11351032
 QuadCost.__new__.__defaults__ = (None,) * len(QuadCost._fields)
 LinDx.__new__.__defaults__ = (None,) * len(LinDx._fields)
+
+
+def garbage_collection_cuda() -> None:
+    """Garbage collection Torch (CUDA) memory."""
+    gc.collect()
+    try:
+        # This is the last thing that should cause an OOM error, but seemingly it can.
+        torch.cuda.empty_cache()
+    except RuntimeError as exception:
+        pass
 
 
 class GradMethods(Enum):
@@ -35,6 +50,7 @@ class GradMethods(Enum):
 
 class SlewRateCost(Module):
     """Hacky way of adding the slew rate penalty to costs."""
+
     # TODO: It would be cleaner to update this to just use the slew
     # rate penalty instead of # slew_C
     def __init__(self, cost, slew_C, n_state, n_ctrl):
@@ -140,7 +156,8 @@ class MPC(Module):
             slew_rate_penalty=None,
             prev_ctrl=None,
             not_improved_lim=5,
-            best_cost_eps=1e-4
+            best_cost_eps=1e-4,
+            debug_memory_mode=False,
     ):
         super().__init__()
 
@@ -178,16 +195,18 @@ class MPC(Module):
 
         self.slew_rate_penalty = slew_rate_penalty
         self.prev_ctrl = prev_ctrl
-
+        self.debug_memory_mode = debug_memory_mode
 
     # @profile
     def forward(self, x_init, cost, dx):
+        if self.debug_memory_mode:
+            print_torch_memory_allocated("(Start of MPC)")
         # QuadCost.C: [T, n_batch, n_tau, n_tau]
         # QuadCost.c: [T, n_batch, n_tau]
         assert isinstance(cost, QuadCost) or \
-            isinstance(cost, Module) or isinstance(cost, Function)
+               isinstance(cost, Module) or isinstance(cost, Function)
         assert isinstance(dx, LinDx) or \
-            isinstance(dx, Module) or isinstance(dx, Function)
+               isinstance(dx, Module) or isinstance(dx, Function)
 
         # TODO: Clean up inferences, expansions, and assumptions made here.
         if self.n_batch is not None:
@@ -198,7 +217,6 @@ class MPC(Module):
             print('MPC Error: Could not infer batch size, pass in as n_batch')
             sys.exit(-1)
 
-
         # if c.ndimension() == 2:
         #     c = c.unsqueeze(1).expand(self.T, n_batch, -1)
 
@@ -207,11 +225,11 @@ class MPC(Module):
             if C.ndimension() == 2:
                 # Add the time and batch dimensions.
                 C = C.unsqueeze(0).unsqueeze(0).expand(
-                    self.T, n_batch, self.n_state+self.n_ctrl, -1)
+                    self.T, n_batch, self.n_state + self.n_ctrl, -1)
             elif C.ndimension() == 3:
                 # Add the batch dimension.
                 C = C.unsqueeze(1).expand(
-                    self.T, n_batch, self.n_state+self.n_ctrl, -1)
+                    self.T, n_batch, self.n_state + self.n_ctrl, -1)
 
             if c.ndimension() == 1:
                 # Add the time and batch dimensions.
@@ -223,17 +241,23 @@ class MPC(Module):
             if C.ndimension() != 4 or c.ndimension() != 3:
                 print('MPC Error: Unexpected QuadCost shape.')
                 sys.exit(-1)
+
             cost = QuadCost(C, c)
+        if self.debug_memory_mode:
+            print_torch_memory_allocated("(Checkpoint 1)")
 
         assert x_init.ndimension() == 2 and x_init.size(0) == n_batch
 
         if self.u_init is None:
-            u = torch.zeros(self.T, n_batch, self.n_ctrl).type_as(x_init.data)
+            u = torch.zeros(self.T, n_batch, self.n_ctrl, device=x_init.device)
         else:
             u = self.u_init
             if u.ndimension() == 2:
-                u = u.unsqueeze(1).expand(self.T, n_batch, -1).clone()
-        u = u.type_as(x_init.data)
+                u = u.unsqueeze(1).expand(self.T, n_batch, -1)
+        u = u.type_as(x_init.data).requires_grad_(True)
+        if self.debug_memory_mode:
+            u.debug_name = f"(MPC) u"
+            print_torch_memory_allocated("(Checkpoint 2)")
 
         if self.verbose > 0:
             print('Initial mean(cost): {:.4e}'.format(
@@ -243,18 +267,23 @@ class MPC(Module):
             ))
 
         best = None
-
+        if self.debug_memory_mode:
+            print_torch_memory_allocated("(Checkpoint 3)")
         n_not_improved = 0
         for i in range(self.lqr_iter):
-            u = Variable(util.detach_maybe(u), requires_grad=True)
+            # u = util.detach_maybe(u).
+            u.grad = None
+            u.requires_grad_(True)
             # Linearize the dynamics around the current trajectory.
-            x = util.get_traj(self.T, u, x_init=x_init, dynamics=dx)
+            x = util.get_traj(self.T, u, x_init=x_init, dynamics=dx, debug_memory_mode=self.debug_memory_mode)
+            if self.debug_memory_mode:
+                print_torch_memory_allocated(f"(Checkpoint 4.1 (loop {i} start))", print_tensors=True)
             if isinstance(dx, LinDx):
                 F, f = dx.F, dx.f
             else:
-                F, f = self.linearize_dynamics(
-                    x, util.detach_maybe(u), dx, diff=False)
-
+                F, f = self.linearize_dynamics(x, util.detach_maybe(u), dx, diff=False)
+            if self.debug_memory_mode:
+                print_torch_memory_allocated(f"(Checkpoint 4.2)", print_tensors=True)
             if isinstance(cost, QuadCost):
                 C, c = cost.C, cost.c
             else:
@@ -262,27 +291,30 @@ class MPC(Module):
                     x, util.detach_maybe(u), cost, diff=False)
 
             x, u, n_total_qp_iter, costs, full_du_norm, mean_alphas = \
-              self.solve_lqr_subproblem(x_init, C, c, F, f, cost, dx, x, u)
+                self.solve_lqr_subproblem(x_init, C, c, F, f, cost, dx, x, u)
             n_not_improved += 1
 
             assert x.ndimension() == 3
             assert u.ndimension() == 3
 
+            # For batching purposes, we need to swap the horizon and batch
+            x_ = util.detach_maybe(x).swapaxes(0, 1)
+            u_ = util.detach_maybe(u).swapaxes(0, 1)
             if best is None:
                 best = {
-                    'x': list(torch.split(x, split_size_or_sections=1, dim=1)),
-                    'u': list(torch.split(u, split_size_or_sections=1, dim=1)),
+                    'x': x_.clone(),
+                    'u': u_.clone(),
                     'costs': costs,
                     'full_du_norm': full_du_norm,
                 }
             else:
-                for j in range(n_batch):
-                    if costs[j] <= best['costs'][j] + self.best_cost_eps:
-                        n_not_improved = 0
-                        best['x'][j] = x[:,j].unsqueeze(1)
-                        best['u'][j] = u[:,j].unsqueeze(1)
-                        best['costs'][j] = costs[j]
-                        best['full_du_norm'][j] = full_du_norm[j]
+                better_solution = torch.where(costs <= best['costs'] + self.best_cost_eps)[0].data
+                if len(better_solution) > 0:
+                    n_not_improved = 0
+                    best['x'][better_solution] = x_[better_solution]
+                    best['u'][better_solution] = u_[better_solution]
+                    best['costs'][better_solution] = costs[better_solution]
+                    best['full_du_norm'][better_solution] = full_du_norm[better_solution]
 
             if self.verbose > 0:
                 util.table_log('lqr', (
@@ -295,28 +327,42 @@ class MPC(Module):
                     ('mean(alphas)', mean_alphas.item(), '{:.2e}'),
                     ('total_qp_iters', n_total_qp_iter),
                 ))
-
-            if max(full_du_norm) < self.eps or \
-               n_not_improved > self.not_improved_lim:
+            if self.debug_memory_mode:
+                print_torch_memory_allocated(f"(Checkpoint 4.3)", print_tensors=True)
+            if torch.max(full_du_norm) < self.eps or \
+                    n_not_improved > self.not_improved_lim:
                 break
 
+        del n_not_improved, n_total_qp_iter, mean_alphas, x_, u_
 
-        x = torch.cat(best['x'], dim=1)
-        u = torch.cat(best['u'], dim=1)
+        if self.debug_memory_mode:
+            print_torch_memory_allocated(f"(Checkpoint 4 (loop {i} end))", print_tensors=True)
+        x_best = best['x'].swapaxes(0, 1)
+        u_best = best['u'].swapaxes(0, 1)
         full_du_norm = best['full_du_norm']
+        if self.debug_memory_mode:
+            x_best.debug_name = f"(MPC) x_best"
+            u_best.debug_name = f"(MPC) u_best"
+            full_du_norm.debug_name = f"(MPC) full_du_norm"
+            print_torch_memory_allocated(f"(Checkpoint 5)", print_tensors=True)
 
         if isinstance(dx, LinDx):
             F, f = dx.F, dx.f
         else:
-            F, f = self.linearize_dynamics(x, u, dx, diff=True)
-
+            F, f = self.linearize_dynamics(x_best, u_best, dx, diff=False)
         if isinstance(cost, QuadCost):
             C, c = cost.C, cost.c
         else:
-            C, c, _ = self.approximate_cost(x, u, cost, diff=True)
+            C, c, _ = self.approximate_cost(x_best, u_best, cost, diff=True)
 
-        x, u = self.solve_lqr_subproblem(
-            x_init, C, c, F, f, cost, dx, x, u, no_op_forward=True)
+        if self.debug_memory_mode:
+            print_torch_memory_allocated(f"(Checkpoint 6)", print_tensors=True)
+
+        x_best, u_best = self.solve_lqr_subproblem(
+            x_init, C, c, F, f, cost, dx, x_best, u_best, no_op_forward=True)
+
+        if self.debug_memory_mode:
+            print_torch_memory_allocated(f"(Checkpoint 7)", print_tensors=True)
 
         if self.detach_unconverged:
             if max(best['full_du_norm']) > self.eps:
@@ -328,14 +374,25 @@ class MPC(Module):
                     print("Detaching and *not* backpropping through the bad examples.")
 
                 I = full_du_norm < self.eps
-                Ix = Variable(I.unsqueeze(0).unsqueeze(2).expand_as(x)).type_as(x.data)
-                Iu = Variable(I.unsqueeze(0).unsqueeze(2).expand_as(u)).type_as(u.data)
-                x = x*Ix + x.clone().detach()*(1.-Ix)
-                u = u*Iu + u.clone().detach()*(1.-Iu)
-
+                Ix = I.unsqueeze(0).unsqueeze(2).expand_as(x_best).type_as(x_best.data)
+                Iu = I.unsqueeze(0).unsqueeze(2).expand_as(u_best).type_as(u_best.data)
+                x_best = x_best * Ix + x_best.clone().detach() * (1. - Ix)
+                u_best = u_best * Iu + u_best.clone().detach() * (1. - Iu)
+                if self.debug_memory_mode:
+                    I.debug_name = f"(MPC) I"
+                    Ix.debug_name = f"(MPC) Ix"
+                    Iu.debug_name = f"(MPC) Iu"
+                del I, Ix, Iu
         costs = best['costs']
-        return (x, u, costs)
+        F.grad = None
+        f.grad = None
 
+        del best, full_du_norm, F, f, C, c
+        if self.debug_memory_mode:
+            print_torch_memory_allocated("(After MPC)", print_tensors=True)
+        return (x_best.detach(), u_best.detach(), costs)
+
+    # @profile
     def solve_lqr_subproblem(self, x_init, C, c, F, f, cost, dynamics, x, u,
                              no_op_forward=False):
         if self.slew_rate_penalty is None or isinstance(cost, Module):
@@ -356,44 +413,44 @@ class MPC(Module):
                 current_u=u,
                 back_eps=self.back_eps,
                 no_op_forward=no_op_forward,
+                debug_memory_mode=self.debug_memory_mode,
             )
-            e = Variable(torch.Tensor())
-            return _lqr(x_init, C, c, F, f if f is not None else e)
+            return _lqr(x_init, C, c, F, f if f is not None else torch.Tensor())
         else:
             nsc = self.n_state + self.n_ctrl
             _n_state = nsc
             _nsc = _n_state + self.n_ctrl
             n_batch = C.size(1)
             _C = torch.zeros(self.T, n_batch, _nsc, _nsc).type_as(C)
-            half_gamI = self.slew_rate_penalty*torch.eye(
+            half_gamI = self.slew_rate_penalty * torch.eye(
                 self.n_ctrl).unsqueeze(0).unsqueeze(0).repeat(self.T, n_batch, 1, 1)
-            _C[:,:,:self.n_ctrl,:self.n_ctrl] = half_gamI
-            _C[:,:,-self.n_ctrl:,:self.n_ctrl] = -half_gamI
-            _C[:,:,:self.n_ctrl,-self.n_ctrl:] = -half_gamI
-            _C[:,:,-self.n_ctrl:,-self.n_ctrl:] = half_gamI
+            _C[:, :, :self.n_ctrl, :self.n_ctrl] = half_gamI
+            _C[:, :, -self.n_ctrl:, :self.n_ctrl] = -half_gamI
+            _C[:, :, :self.n_ctrl, -self.n_ctrl:] = -half_gamI
+            _C[:, :, -self.n_ctrl:, -self.n_ctrl:] = half_gamI
             slew_C = _C.clone()
             _C = _C + torch.nn.ZeroPad2d((self.n_ctrl, 0, self.n_ctrl, 0))(C)
 
             _c = torch.cat((
-                torch.zeros(self.T, n_batch, self.n_ctrl).type_as(c),c), 2)
+                torch.zeros(self.T, n_batch, self.n_ctrl).type_as(c), c), 2)
 
             _F0 = torch.cat((
-                torch.zeros(self.n_ctrl, self.n_state+self.n_ctrl),
+                torch.zeros(self.n_ctrl, self.n_state + self.n_ctrl),
                 torch.eye(self.n_ctrl),
             ), 1).type_as(F).unsqueeze(0).unsqueeze(0).repeat(
-                self.T-1, n_batch, 1, 1
+                self.T - 1, n_batch, 1, 1
             )
             _F1 = torch.cat((
                 torch.zeros(
-                    self.T-1, n_batch, self.n_state, self.n_ctrl
-                ).type_as(F),F), 3)
+                    self.T - 1, n_batch, self.n_state, self.n_ctrl
+                ).type_as(F), F), 3)
             _F = torch.cat((_F0, _F1), 2)
 
             if f is not None:
                 _f = torch.cat((
-                    torch.zeros(self.T-1, n_batch, self.n_ctrl).type_as(f),f), 2)
+                    torch.zeros(self.T - 1, n_batch, self.n_ctrl).type_as(f), f), 2)
             else:
-                _f = Variable(torch.Tensor())
+                _f = torch.Tensor()
 
             u_data = util.detach_maybe(u)
             if self.prev_ctrl is not None:
@@ -408,7 +465,7 @@ class MPC(Module):
             utm1s = torch.cat((prev_u, u_data[:-1])).clone()
             _x = torch.cat((utm1s, x), 2)
 
-            _x_init = torch.cat((Variable(prev_u[0]), x_init), 1)
+            _x_init = torch.cat((prev_u[0], x_init), 1)
 
             if not isinstance(dynamics, LinDx):
                 _dynamics = CtrlPassthroughDynamics(dynamics)
@@ -441,13 +498,13 @@ class MPC(Module):
                 no_op_forward=no_op_forward,
             )
             x, *rest = _lqr(_x_init, _C, _c, _F, _f)
-            x = x[:,:,self.n_ctrl:]
+            x = x[:, :, self.n_ctrl:]
             return [x] + rest
 
     def approximate_cost(self, x, u, Cf, diff=True):
         with torch.enable_grad():
             tau = torch.cat((x, u), dim=2).data
-            tau = Variable(tau, requires_grad=True)
+            tau = tau.requires_grad_(True)
             if self.slew_rate_penalty is not None:
                 print("""
 MPC Error: Using a non-convex cost with a slew rate penalty is not yet implemented.
@@ -463,7 +520,7 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
             for t in range(self.T):
                 tau_t = tau[t]
                 if self.slew_rate_penalty is not None:
-                    cost = Cf(tau_t) + (slew_penalty[t-1] if t > 0 else 0)
+                    cost = Cf(tau_t) + (slew_penalty[t - 1] if t > 0 else 0)
                 else:
                     cost = Cf(tau_t)
 
@@ -488,14 +545,15 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
 
     # @profile
     def linearize_dynamics(self, x, u, dynamics, diff):
-        # TODO: Cleanup variable usage.
-
+        # TODO: Cleanup torch.Tensor usage.
+        if self.debug_memory_mode:
+            # print_torch_memory_allocated("(Start of linearize_dynamics)")
+            pass
         n_batch = x[0].size(0)
 
         if self.grad_method == GradMethods.ANALYTIC:
-            _u = Variable(u[:-1].view(-1, self.n_ctrl), requires_grad=True)
-            _x = Variable(x[:-1].contiguous().view(-1, self.n_state),
-                          requires_grad=True)
+            _u = u[:-1].view(-1, self.n_ctrl).requires_grad_(True)
+            _x = x[:-1].contiguous().view(-1, self.n_state).requires_grad_(True)
 
             # This inefficiently calls dynamics again, but is worth it because
             # we can efficiently compute grad_input for every time step at once.
@@ -513,49 +571,86 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
             R, S = dynamics.grad_input(_x, _u)
 
             f = _new_x - util.bmv(R, _x) - util.bmv(S, _u)
-            f = f.view(self.T-1, n_batch, self.n_state)
+            f = f.view(self.T - 1, n_batch, self.n_state)
 
-            R = R.contiguous().view(self.T-1, n_batch, self.n_state, self.n_state)
-            S = S.contiguous().view(self.T-1, n_batch, self.n_state, self.n_ctrl)
+            R = R.contiguous().view(self.T - 1, n_batch, self.n_state, self.n_state)
+            S = S.contiguous().view(self.T - 1, n_batch, self.n_state, self.n_ctrl)
             F = torch.cat((R, S), 3)
 
+            del _u, _x, _new_x, R, S
+
             if not diff:
-                F, f = list(map(Variable, [F, f]))
+                F, f = list(map(torch.Tensor, [F, f]))
             return F, f
         else:
             # TODO: This is inefficient and confusing.
-            x_init = x[0]
-            x = [x_init]
-            F, f = [], []
-            for t in range(self.T):
-                if t < self.T-1:
-                    xt = Variable(x[t], requires_grad=True)
-                    ut = Variable(u[t], requires_grad=True)
-                    xut = torch.cat((xt, ut), 1)
-                    new_x = dynamics(xt, ut)
+            x_new_traj = [x[0]]
+            # Initiate variables:
+            F = torch.zeros(self.T - 1, n_batch, self.n_state, self.n_state + self.n_ctrl, device=x.device)
+            f = torch.zeros(self.T - 1, n_batch, self.n_state, device=x.device)
+            if self.debug_memory_mode:
+                F.debug_name = "(LD) F"
+                f.debug_name = "(LD) f"
 
+            xt = None
+            ut = None
+            new_x = None
+            Rt = torch.zeros(n_batch, self.n_state, self.n_state, device=x.device)
+            St = torch.zeros(n_batch, self.n_state, self.n_ctrl, device=x.device)
+            if self.debug_memory_mode:
+                Rt.debug_name = "(LD) Rt"
+                St.debug_name = "(LD) St"
+            for t in range(self.T):
+                if self.debug_memory_mode:
+                    # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 1 loop start (t={t}))")  # 3 added
+                    pass
+                Rt.swapaxes_(0, 1).zero_()
+                St.swapaxes_(0, 1).zero_()
+                if t < self.T - 1:
+                    del xt, ut, new_x
+                    xt = x_new_traj[t].requires_grad_(True)
+                    ut = u[t].requires_grad_(True)
+                    new_x = dynamics(xt, ut)
+                    if self.debug_memory_mode:
+                        xt.debug_name = f"(LD) xt_{t}"
+                        ut.debug_name = f"(LD) ut_{t}"
+                        new_x.debug_name = f"(LD) new_x_{t}"
+                        # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 1 loop start (t={t}))")  # 8 added
                     # Linear dynamics approximation.
                     if self.grad_method in [GradMethods.AUTO_DIFF,
-                                             GradMethods.ANALYTIC_CHECK]:
-                        Rt, St = [], []
+                                            GradMethods.ANALYTIC_CHECK]:
                         for j in range(self.n_state):
+                            if self.debug_memory_mode:
+                                # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 2 loop start (t={t}, j={j}))")
+                                pass
                             Rj, Sj = torch.autograd.grad(
-                                new_x[:,j].sum(), [xt, ut],
-                                retain_graph=True)
+                                outputs=new_x[:, j].sum(),
+                                inputs=[xt, ut],
+                                retain_graph=j != self.n_state - 1)
+                            if self.debug_memory_mode:
+                                Rj.debug_name = f"(LD) Rj_{t}_{j}"
+                                Sj.debug_name = f"(LD) Sj_{t}_{j}"
                             if not diff:
                                 Rj, Sj = Rj.data, Sj.data
-                            Rt.append(Rj)
-                            St.append(Sj)
-                        Rt = torch.stack(Rt, dim=1)
-                        St = torch.stack(St, dim=1)
+                                if self.debug_memory_mode:
+                                    Rj.debug_name = f"(LD) Rj_{t}_{j}_data"
+                                    Sj.debug_name = f"(LD) Sj_{t}_{j}_data"
+                            Rt[j] = Rj
+                            St[j] = Sj
+                            del Rj, Sj  # Succesfully deleted
+                            if self.debug_memory_mode:
+                                # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 2 loop end (t={t}, j={j}))")
+                                pass
 
+                        Rt.swapaxes_(0, 1)
+                        St.swapaxes_(0, 1)
                         if self.grad_method == GradMethods.ANALYTIC_CHECK:
-                            assert False # Not updated
+                            assert False  # Not updated
                             Rt_autograd, St_autograd = Rt, St
                             Rt, St = dynamics.grad_input(xt, ut)
                             eps = 1e-8
-                            if torch.max(torch.abs(Rt-Rt_autograd)).data[0] > eps or \
-                            torch.max(torch.abs(St-St_autograd)).data[0] > eps:
+                            if torch.max(torch.abs(Rt - Rt_autograd)).data[0] > eps or \
+                                    torch.max(torch.abs(St - St_autograd)).data[0] > eps:
                                 print('''
         nmpc.ANALYTIC_CHECK error: The analytic derivative of the dynamics function may be off.
                                 ''')
@@ -572,7 +667,7 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
                                 lambda s: dynamics(s, ut[i]), xt[i], 1e-4
                             )
                             Si = util.jacobian(
-                                lambda a : dynamics(xt[i], a), ut[i], 1e-4
+                                lambda a: dynamics(xt[i], a), ut[i], 1e-4
                             )
                             if not diff:
                                 Ri, Si = Ri.data, Si.data
@@ -583,19 +678,36 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
                     else:
                         assert False
 
-                    Ft = torch.cat((Rt, St), 2)
-                    F.append(Ft)
-
+                    Ft = torch.cat((Rt, St), -1)
+                    if self.debug_memory_mode:
+                        Ft.debug_name = f"(LD) Ft_{t}"
+                    F[t] = Ft
                     if not diff:
                         xt, ut, new_x = xt.data, ut.data, new_x.data
+                        if self.debug_memory_mode:
+                            xt.debug_name = f"(LD) xt_{t}_data"
+                            ut.debug_name = f"(LD) ut_{t}_data"
+                            new_x.debug_name = f"(LD) new_x_{t}_data"
+
                     ft = new_x - util.bmv(Rt, xt) - util.bmv(St, ut)
-                    f.append(ft)
+                    if self.debug_memory_mode:
+                        ft.debug_name = f"(LD) ft_{t}"
+                    f[t] = ft
+                    del Ft, ft
+                    if self.debug_memory_mode:
+                        # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 3 loop end (t={t}))")
+                        pass
 
-                if t < self.T-1:
-                    x.append(util.detach_maybe(new_x))
+                if t < self.T - 1:
+                    x_new_traj.append(util.detach_maybe(new_x))
 
-            F = torch.stack(F, 0)
-            f = torch.stack(f, 0)
+            if self.debug_memory_mode:
+                # print_torch_memory_allocated("(End of linearize_dynamics)")
+                pass
+            del x, new_x, xt, ut, Rt, St, x_new_traj
+            if self.debug_memory_mode:
+                # print_torch_memory_allocated("(End of linearize_dynamics (after del))")
+                pass
             if not diff:
-                F, f = list(map(Variable, [F, f]))
+                return F.data, f.data
             return F, f
