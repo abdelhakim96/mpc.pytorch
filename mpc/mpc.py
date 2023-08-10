@@ -277,13 +277,13 @@ class MPC(Module):
             # Linearize the dynamics around the current trajectory.
             x = util.get_traj(self.T, u, x_init=x_init, dynamics=dx, debug_memory_mode=self.debug_memory_mode)
             if self.debug_memory_mode:
-                print_torch_memory_allocated(f"(Checkpoint 4.1 (loop {i} start))", print_tensors=True)
+                print_torch_memory_allocated(f"(Checkpoint 4.1 (loop {i} start))", print_tensors=False)
             if isinstance(dx, LinDx):
                 F, f = dx.F, dx.f
             else:
                 F, f = self.linearize_dynamics(x, util.detach_maybe(u), dx, diff=False)
             if self.debug_memory_mode:
-                print_torch_memory_allocated(f"(Checkpoint 4.2)", print_tensors=True)
+                print_torch_memory_allocated(f"(Checkpoint 4.2)", print_tensors=False)
             if isinstance(cost, QuadCost):
                 C, c = cost.C, cost.c
             else:
@@ -328,7 +328,7 @@ class MPC(Module):
                     ('total_qp_iters', n_total_qp_iter),
                 ))
             if self.debug_memory_mode:
-                print_torch_memory_allocated(f"(Checkpoint 4.3)", print_tensors=True)
+                print_torch_memory_allocated(f"(Checkpoint 4.3)", print_tensors=False)
             if torch.max(full_du_norm) < self.eps or \
                     n_not_improved > self.not_improved_lim:
                 break
@@ -336,7 +336,7 @@ class MPC(Module):
         del n_not_improved, n_total_qp_iter, mean_alphas, x_, u_
 
         if self.debug_memory_mode:
-            print_torch_memory_allocated(f"(Checkpoint 4 (loop {i} end))", print_tensors=True)
+            print_torch_memory_allocated(f"(Checkpoint 4 (loop {i} end))", print_tensors=False)
         x_best = best['x'].swapaxes(0, 1)
         u_best = best['u'].swapaxes(0, 1)
         full_du_norm = best['full_du_norm']
@@ -344,25 +344,27 @@ class MPC(Module):
             x_best.debug_name = f"(MPC) x_best"
             u_best.debug_name = f"(MPC) u_best"
             full_du_norm.debug_name = f"(MPC) full_du_norm"
-            print_torch_memory_allocated(f"(Checkpoint 5)", print_tensors=True)
+            print_torch_memory_allocated(f"(Checkpoint 5)", print_tensors=False)
 
         if isinstance(dx, LinDx):
             F, f = dx.F, dx.f
         else:
-            F, f = self.linearize_dynamics(x_best, u_best, dx, diff=False)
+            # TODO: IF DIFF IS SET TO TRUE IT WILL COULD CAUSE A MEMORY LEAK
+            F, f = self.linearize_dynamics(x_best, u_best, dx, diff=True)
+
         if isinstance(cost, QuadCost):
             C, c = cost.C, cost.c
         else:
             C, c, _ = self.approximate_cost(x_best, u_best, cost, diff=True)
 
         if self.debug_memory_mode:
-            print_torch_memory_allocated(f"(Checkpoint 6)", print_tensors=True)
+            print_torch_memory_allocated(f"(Checkpoint 6)", print_tensors=False)
 
         x_best, u_best = self.solve_lqr_subproblem(
             x_init, C, c, F, f, cost, dx, x_best, u_best, no_op_forward=True)
 
         if self.debug_memory_mode:
-            print_torch_memory_allocated(f"(Checkpoint 7)", print_tensors=True)
+            print_torch_memory_allocated(f"(Checkpoint 7)", print_tensors=False)
 
         if self.detach_unconverged:
             if max(best['full_du_norm']) > self.eps:
@@ -384,13 +386,66 @@ class MPC(Module):
                     Iu.debug_name = f"(MPC) Iu"
                 del I, Ix, Iu
         costs = best['costs']
-        F.grad = None
-        f.grad = None
 
-        del best, full_du_norm, F, f, C, c
+        self.del_variables([F, f, C, c, x, u, x_init, cost, dx, best, full_du_norm])
+
         if self.debug_memory_mode:
-            print_torch_memory_allocated("(After MPC)", print_tensors=True)
+            print_torch_memory_allocated("(After MPC)", print_tensors=True, delete_before=True)
         return (x_best.detach(), u_best.detach(), costs)
+
+    def del_variables(self, list_of_var):
+        list_of_tensors = []
+        for var in list_of_var:
+            if var is None:
+                continue
+            if isinstance(var, torch.Tensor):
+                list_of_tensors.append(var)
+            elif isinstance(var, list) or isinstance(var, tuple) or isinstance(var, set) or isinstance(var, dict):
+                for t in self.unpack_var(var):
+                    list_of_tensors.append(t)
+        # Delete tensors
+        for t in list_of_tensors:
+            try:
+                t.requires_grad_(False)
+                t.detach_()
+            except:
+                print(f"Error detaching tensor: {t.debug_name}")
+            # if not t.is_leaf:
+            #     t.detach_()
+            if t.grad is not None:
+                del t.grad
+            del t
+
+        # Delete variables
+        for var in list_of_var:
+            if var is None:
+                continue
+            else:
+                del var
+
+    def unpack_var(self, var):
+        ts = []
+        if isinstance(var, torch.Tensor):
+            return [var]
+
+        if isinstance(var, list):
+            for v in var:
+                ts += self.unpack_var(v)
+            return ts
+        if isinstance(var, tuple):
+            for v in var:
+                ts += self.unpack_var(v)
+            return ts
+        if isinstance(var, set):
+            for v in var:
+                ts += self.unpack_var(v)
+            return ts
+        if isinstance(var, dict):
+            for v in var.values():
+                ts += self.unpack_var(v)
+            return ts
+
+        return ts
 
     # @profile
     def solve_lqr_subproblem(self, x_init, C, c, F, f, cost, dynamics, x, u,
@@ -507,10 +562,10 @@ class MPC(Module):
             tau = tau.requires_grad_(True)
             if self.slew_rate_penalty is not None:
                 print("""
-MPC Error: Using a non-convex cost with a slew rate penalty is not yet implemented.
-The current implementation does not correctly do a line search.
-More details: https://github.com/locuslab/mpc.pytorch/issues/12
-""")
+    MPC Error: Using a non-convex cost with a slew rate penalty is not yet implemented.
+    The current implementation does not correctly do a line search.
+    More details: https://github.com/locuslab/mpc.pytorch/issues/12
+    """)
                 sys.exit(-1)
                 differences = tau[1:, :, -self.n_ctrl:] - tau[:-1, :, -self.n_ctrl:]
                 slew_penalty = (self.slew_rate_penalty * differences.pow(2)).sum(-1)
@@ -607,6 +662,7 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
                 Rt.swapaxes_(0, 1).zero_()
                 St.swapaxes_(0, 1).zero_()
                 if t < self.T - 1:
+                    # self.del_variables([xt, ut, new_x])
                     del xt, ut, new_x
                     xt = x_new_traj[t].requires_grad_(True)
                     ut = u[t].requires_grad_(True)
@@ -652,13 +708,13 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
                             if torch.max(torch.abs(Rt - Rt_autograd)).data[0] > eps or \
                                     torch.max(torch.abs(St - St_autograd)).data[0] > eps:
                                 print('''
-        nmpc.ANALYTIC_CHECK error: The analytic derivative of the dynamics function may be off.
-                                ''')
+            nmpc.ANALYTIC_CHECK error: The analytic derivative of the dynamics function may be off.
+                                    ''')
                             else:
                                 print('''
-        nmpc.ANALYTIC_CHECK: The analytic derivative of the dynamics function seems correct.
-        Re-run with GradMethods.ANALYTIC to continue.
-                                ''')
+            nmpc.ANALYTIC_CHECK: The analytic derivative of the dynamics function seems correct.
+            Re-run with GradMethods.ANALYTIC to continue.
+                                    ''')
                             sys.exit(0)
                     elif self.grad_method == GradMethods.FINITE_DIFF:
                         Rt, St = [], []
@@ -693,6 +749,8 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
                     if self.debug_memory_mode:
                         ft.debug_name = f"(LD) ft_{t}"
                     f[t] = ft
+                    Ft.detach_()
+                    ft.detach_()
                     del Ft, ft
                     if self.debug_memory_mode:
                         # print_torch_memory_allocated(f"(linearize_dynamics checkpoint 3 loop end (t={t}))")
@@ -704,6 +762,7 @@ More details: https://github.com/locuslab/mpc.pytorch/issues/12
             if self.debug_memory_mode:
                 # print_torch_memory_allocated("(End of linearize_dynamics)")
                 pass
+            # self.del_variables([xt, ut, new_x, Rt, St, x_new_traj])
             del x, new_x, xt, ut, Rt, St, x_new_traj
             if self.debug_memory_mode:
                 # print_torch_memory_allocated("(End of linearize_dynamics (after del))")

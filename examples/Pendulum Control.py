@@ -31,9 +31,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = 'cpu'
 
 # PARAMS:
-debug_memory_mode = False
+debug_memory_mode = True
 # n_batch, T, mpc_T = 5000, 100, 5
-n_batch, T, mpc_horizon = 1_000_000, 100, 10
+n_batch, T, mpc_horizon = 2, 100, 20
 generate_video = False
 
 params = torch.tensor((10., 1., 1.), device=device)  # Not sure what these params are

@@ -151,7 +151,7 @@ def print_torch_memory_allocated(state: str = None, print_tensors: bool = False,
     for obj in gc.get_objects():
         try:
             if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                if print_tensors and False:
+                if print_tensors:
                     print("\tvariable_name: " + ("NoSetName" if not hasattr(obj, "debug_name") else obj.debug_name),
                           "\t", obj.size(),
                           )

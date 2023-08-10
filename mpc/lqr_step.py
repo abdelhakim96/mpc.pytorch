@@ -143,7 +143,9 @@ def lqr_backward(ctx, C, c, F, f, n_state, n_ctrl, T, u_lower, u_upper, u_zero_I
 
 
 @profile
-def lqr_forward(ctx, x_init, C, c, F, f, Ks, ks, T, u_lower, u_upper, u_zero_I, delta_u,
+def lqr_forward(ctx, x_init, C,
+                c, F, f, # Never used? Then why do we bother with computing grad of f?
+                Ks, ks, T, u_lower, u_upper, u_zero_I, delta_u,
                 linesearch_decay, max_linesearch_iter, true_cost, true_dynamics):
     x = ctx.current_x
     u = ctx.current_u
@@ -276,119 +278,8 @@ def LQRStep(n_state,
             TODO
         """
 
-    # @profile
-    # def lqr_backward(ctx, C, c, F, f):
-    #     n_batch = C.size(1)
-    #
-    #     u = ctx.current_u
-    #     Ks = []
-    #     ks = []
-    #     prev_kt = None
-    #     n_total_qp_iter = 0
-    #     Vtp1 = vtp1 = None
-    #     for t in range(T - 1, -1, -1):
-    #         if t == T - 1:
-    #             Qt = C[t]
-    #             qt = c[t]
-    #         else:
-    #             Ft = F[t]
-    #             Ft_T = Ft.transpose(1, 2)
-    #             Qt = C[t] + Ft_T.bmm(Vtp1).bmm(Ft)
-    #             if f is None or f.nelement() == 0:
-    #                 qt = c[t] + Ft_T.bmm(vtp1.unsqueeze(2)).squeeze(2)
-    #             else:
-    #                 ft = f[t]
-    #                 qt = c[t] + Ft_T.bmm(Vtp1).bmm(ft.unsqueeze(2)).squeeze(2) + \
-    #                      Ft_T.bmm(vtp1.unsqueeze(2)).squeeze(2)
-    #
-    #         Qt_xx = Qt[:, :n_state, :n_state]
-    #         Qt_xu = Qt[:, :n_state, n_state:]
-    #         Qt_ux = Qt[:, n_state:, :n_state]
-    #         Qt_uu = Qt[:, n_state:, n_state:]
-    #         qt_x = qt[:, :n_state]
-    #         qt_u = qt[:, n_state:]
-    #
-    #         if u_lower is None:
-    #             if n_ctrl == 1 and u_zero_I is None:
-    #                 Kt = -(1. / Qt_uu) * Qt_ux
-    #                 kt = -(1. / Qt_uu.squeeze(2)) * qt_u
-    #             else:
-    #                 if u_zero_I is None:
-    #                     Qt_uu_inv = [
-    #                         torch.pinverse(Qt_uu[i]) for i in range(Qt_uu.shape[0])
-    #                     ]
-    #                     Qt_uu_inv = torch.stack(Qt_uu_inv)
-    #                     Kt = -Qt_uu_inv.bmm(Qt_ux)
-    #                     kt = util.bmv(-Qt_uu_inv, qt_u)
-    #
-    #                     # Qt_uu_LU = Qt_uu.lu()
-    #                     # Kt = -Qt_ux.lu_solve(*Qt_uu_LU)
-    #                     # kt = -qt_u.lu_solve(*Qt_uu_LU)
-    #                 else:
-    #                     # Solve with zero constraints on the active controls.
-    #                     I = u_zero_I[t].float()
-    #                     notI = 1 - I
-    #
-    #                     qt_u_ = qt_u.clone()
-    #                     qt_u_[I.bool()] = 0
-    #
-    #                     Qt_uu_ = Qt_uu.clone()
-    #
-    #                     if I.is_cuda:
-    #                         notI_ = notI.float()
-    #                         Qt_uu_I = (1 - util.bger(notI_, notI_)).type_as(I)
-    #                     else:
-    #                         Qt_uu_I = 1 - util.bger(notI, notI)
-    #
-    #                     Qt_uu_[Qt_uu_I.bool()] = 0.
-    #                     Qt_uu_[util.bdiag(I).bool()] += 1e-8
-    #
-    #                     Qt_ux_ = Qt_ux.clone()
-    #                     Qt_ux_[I.unsqueeze(2).repeat(1, 1, Qt_ux.size(2)).bool()] = 0.
-    #
-    #                     if n_ctrl == 1:
-    #                         Kt = -(1. / Qt_uu_) * Qt_ux_
-    #                         kt = -(1. / Qt_uu.squeeze(2)) * qt_u_
-    #                     else:
-    #                         Qt_uu_LU_ = Qt_uu_.lu()
-    #                         Kt = -Qt_ux_.lu_solve(*Qt_uu_LU_)
-    #                         kt = -qt_u_.unsqueeze(2).lu_solve(*Qt_uu_LU_).squeeze(2)
-    #         else:
-    #             assert delta_space
-    #             lb = get_bound('lower', t) - u[t]
-    #             ub = get_bound('upper', t) - u[t]
-    #             if delta_u is not None:
-    #                 lb[lb < -delta_u] = -delta_u
-    #                 ub[ub > delta_u] = delta_u
-    #             kt, Qt_uu_free_LU, If, n_qp_iter = pnqp(
-    #                 Qt_uu, qt_u, lb, ub,
-    #                 x_init=prev_kt, n_iter=20)
-    #             if verbose > 1:
-    #                 print('  + n_qp_iter: ', n_qp_iter + 1)
-    #             n_total_qp_iter += 1 + n_qp_iter
-    #             prev_kt = kt
-    #             Qt_ux_ = Qt_ux.clone()
-    #             Qt_ux_[(1 - If).unsqueeze(2).repeat(1, 1, Qt_ux.size(2)).bool()] = 0
-    #             if n_ctrl == 1:
-    #                 # Bad naming, Qt_uu_free_LU isn't the LU in this case.
-    #                 Kt = -((1. / Qt_uu_free_LU) * Qt_ux_)
-    #             else:
-    #                 Kt = -Qt_ux_.lu_solve(*Qt_uu_free_LU)
-    #
-    #         Kt_T = Kt.transpose(1, 2)
-    #
-    #         Ks.append(Kt)
-    #         ks.append(kt)
-    #
-    #         Vtp1 = Qt_xx + Qt_xu.bmm(Kt) + Kt_T.bmm(Qt_ux) + Kt_T.bmm(Qt_uu).bmm(Kt)
-    #         vtp1 = qt_x + Qt_xu.bmm(kt.unsqueeze(2)).squeeze(2) + \
-    #                Kt_T.bmm(qt_u.unsqueeze(2)).squeeze(2) + \
-    #                Kt_T.bmm(Qt_uu).bmm(kt.unsqueeze(2)).squeeze(2)
-    #
-    #     return Ks, ks, n_total_qp_iter
-
     class LQRStepFn(Function):
-        # @profile
+
         @staticmethod
         # @profile
         def forward(ctx, x_init, C, c, F, f=None):
@@ -424,8 +315,7 @@ def LQRStep(n_state,
                                                 linesearch_decay, max_linesearch_iter, true_cost, true_dynamics)
             ctx.save_for_backward(x_init, C, c, F, f, new_x, new_u)
 
-            return new_x, new_u, torch.Tensor([n_total_qp_iter]), \
-                for_out.costs, for_out.full_du_norm, for_out.mean_alphas
+            return new_x, new_u, torch.Tensor([n_total_qp_iter]), for_out.costs, for_out.full_du_norm, for_out.mean_alphas
 
         @staticmethod
         # @profile
