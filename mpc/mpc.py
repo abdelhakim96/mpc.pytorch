@@ -350,7 +350,7 @@ class MPC(Module):
             F, f = dx.F, dx.f
         else:
             # TODO: IF DIFF IS SET TO TRUE IT WILL COULD CAUSE A MEMORY LEAK
-            F, f = self.linearize_dynamics(x_best, u_best, dx, diff=True)
+            F, f = self.linearize_dynamics(x_best, u_best, dx, diff=False)
 
         if isinstance(cost, QuadCost):
             C, c = cost.C, cost.c
@@ -403,13 +403,14 @@ class MPC(Module):
             elif isinstance(var, list) or isinstance(var, tuple) or isinstance(var, set) or isinstance(var, dict):
                 for t in self.unpack_var(var):
                     list_of_tensors.append(t)
+
         # Delete tensors
         for t in list_of_tensors:
             try:
                 t.requires_grad_(False)
                 t.detach_()
-            except:
-                print(f"Error detaching tensor: {t.debug_name}")
+            except Exception as e:
+                print(f"{e} -- Error detaching tensor: {t.debug_name if hasattr(t, 'debug_name') else ''}")
             # if not t.is_leaf:
             #     t.detach_()
             if t.grad is not None:

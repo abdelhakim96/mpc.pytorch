@@ -31,9 +31,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = 'cpu'
 
 # PARAMS:
-debug_memory_mode = False
+debug_memory_mode = True
 # n_batch, T, mpc_T = 5000, 100, 5
-n_batch, T, mpc_horizon = 10_000, 100, 10
+n_batch, T, mpc_horizon = 2, 100, 20
 generate_video = False
 
 params = torch.tensor((10., 1., 1.), device=device)  # Not sure what these params are
@@ -140,14 +140,19 @@ my_mpc.to(device)
 if debug_memory_mode:
     my_mpc.debug_name = f"(PC) my_mpc"
 for t in tqdm(range(T)):
+    t1 = time.perf_counter()
+    if debug_memory_mode:
+        print_torch_memory_allocated("(Before MPC call)", print_tensors=True)
     nominal_states, nominal_actions, nominal_objs = my_mpc.forward(x, QuadCost(Q, p), dx)
     if debug_memory_mode:
         nominal_states.debug_name = f"(PC) nominal_states"
         nominal_actions.debug_name = f"(PC) nominal_actions"
         nominal_objs.debug_name = f"(PC) nominal_objs"
     # my_mpc.zero_grad()
-
-    # garbage_collection_cuda()
+    if debug_memory_mode:
+        print_torch_memory_allocated("(out of scope test)", print_tensors=True)
+    garbage_collection_cuda()
+    t2 = time.perf_counter()
     # print('MPC took {:.03f} sec'.format(t2 - t1))
     next_action = nominal_actions[0]
     u_init = torch.cat((nominal_actions[1:], torch.zeros(1, n_batch, dx.n_ctrl, device=device)), dim=0)
